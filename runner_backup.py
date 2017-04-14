@@ -43,6 +43,7 @@ class UserOptions:
         self.DFLT_EXCLUDE_FILE = '/media/storage/meta/excludes.txt'
         self.DFLT_SYNC_REMOTE_LOG = '/media/storage/synchronization_{curr_datetime:%Y-%m-%dT%H%M}.log'
         self.DFLT_SYNC_LOCAL_LOG = '/media/storage/meta/synchronization_{curr_datetime:%Y-%m-%dT%H%M}.log'
+        self.DFLT_INCLUDE_FILE = '/media/storage/meta/includes.txt'
 
         self.Dry_run = False
         self.Delete_with_sync = False
@@ -58,9 +59,12 @@ class UserOptions:
         self.Src_syncstatus_file = self.DFLT_SRC_SYNCSTATUS_FILE
         # self.Excludes = self.DFLT_EXCLUDES
         self.Exclude_file = self.DFLT_EXCLUDE_FILE
+        self.Include_file = self.DFLT_INCLUDE_FILE
         self.Keep_remote_sync_log = True
         self.Sync_local_log = self.DFLT_SYNC_LOCAL_LOG.format(curr_datetime=datetime.datetime.now())
         self.Sync_remote_log = self.DFLT_SYNC_REMOTE_LOG.format(curr_datetime=datetime.datetime.now())
+        self.Use_file_list = False
+        self.Newer_than = None
 
 
 # Global user options object (TODO: singleton access) -->
@@ -226,7 +230,6 @@ def write_metadata(metadata: dict):
         json.dump(metadata, metafile)
 
     logging.info('local metadata ({metafile}) file updated'.format(metafile=user_options.DFLT_METADATA_FILE))
-
 
 
 def read_metadata(filename:str, interactive=True):
@@ -492,7 +495,7 @@ def validate_source_integrity(hash_reference_files:bool=False):
 def exec_rsync():
     """
     Perform the rsync. In case of error an exception is thrown.
-    TODO: more granular error handling and implement sync_with_delete param...
+    TODO: more granular error handling.
     :return:
     """
 
@@ -517,6 +520,9 @@ def exec_rsync():
     if user_options.Keep_remote_sync_log:
         rsync_params.append('--remote-option')
         rsync_params.append('--log-file={}'.format(user_options.Sync_remote_log))
+
+    if user_options.Include_file:
+        rsync_params.append('--include-from={include_file}'.format(include_file=user_options.Include_file))
 
     rsync_params.append('{user}@{host}:{sync_source}'.format(
         user=user_options.Src_username,
@@ -563,6 +569,45 @@ def control_netinterface(new_state:IFaceState):
         return False
 
 
+def get_sync_filelist():
+    if user_options.Use_file_list is True and user_options.Newer_than is not None:
+        print('getting filenames...')
+        cmd_find = 'find {search_loc} -newermt "{date_newerthan}" -type f'.format(
+            search_loc=user_options.Src_path,
+            date_newerthan=user_options.Newer_than.strftime("%Y%m%d")
+        )
+
+        p_result = subprocess.run(
+            [
+                BIN_SSH,
+                '{user}@{host}'.format(user=user_options.Src_username, host=user_options.Src_host),
+                cmd_find
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+
+        if p_result is not None and p_result.returncode == 0:
+
+            stdout = str(p_result.stdout)
+            with open(user_options.Include_file, 'w') as include_file:
+                include_file.write(stdout)
+                # include_file.writelines(stdout.splitlines())
+
+
+    else:
+        print('nope')
+
+#         find <loc> -type f -newermt "<yyyyMMdd>"
+
+
+def cleanup():
+    if user_options.Newer_than is not None and os.path.exists(user_options.Include_file):
+        os.remove(user_options.Include_file)
+
+
+
 def parse_args():
     global user_options
 
@@ -590,6 +635,8 @@ def parse_args():
                         help='The interface to use when \'--control-nic\' option is used.')
     parser.add_argument('--remote-rsync-log', dest='remote_rsync_log', default=None, type=str,
                         help='The path on the source system to keep the rsync log. If not specified it is not created.')
+    parser.add_argument('--newer-than', dest='newer_than', default=None, type=str,
+                        help='Only sync files and directories newer then <yyyy-MM-dd hh:mm>')
 
     args = parser.parse_args()
 
@@ -620,6 +667,15 @@ def parse_args():
     if args.remote_rsync_log:
         user_options.Keep_remote_sync_log = True
         user_options.Sync_remote_log = args.remote_rsync_log
+    if args.newer_than:
+        user_options.Use_file_list = True
+
+        try:
+            newerThanDate = datetime.datetime.strptime(args.newer_than, "%Y-%m-%d")
+            user_options.Newer_than = newerThanDate
+        except Exception as ex:
+            print('err: {}'.format(ex))
+            exit(1)
 
     return user_options
 
@@ -642,6 +698,10 @@ def init_logger():
 if __name__ == '__main__':
     # Get user options -->
     parse_args()
+
+    get_sync_filelist()
+
+    exit(0)
     # log_format = format=' %(asctime)s - %(levelname)s - %(funcName)s - %(message)s'
     #
     # logging.getLogger().addHandler(logging.StreamHandler())
@@ -661,6 +721,7 @@ if __name__ == '__main__':
 
     # Read info from previous run -->
     metadata = read_metadata(user_options.DFLT_METADATA_FILE, interactive=True)
+
     print('''
     Previous run:
     \tVersion: {version}
@@ -686,7 +747,6 @@ if __name__ == '__main__':
                force=user_options.Force
         )
     )
-
 
     # Validate whether source is usable (link and content) -->
     validate_result = validate_source_integrity(hash_reference_files=False)
