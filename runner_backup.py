@@ -21,6 +21,7 @@ import logging
 import argparse
 import re
 from enum import Enum
+from pathlib import PurePath
 # TODO: get rid of these globals -->
 
 
@@ -28,7 +29,7 @@ class UserOptions:
     def __init__(self):
         self.DFLT_SRC_HOST = '192.168.42.10'
         self.DFLT_SRC_USER = 'backup'
-        self.DFLT_SRC_PATH = '/media/storage/'
+        self.DFLT_SRC_PATH = '/media/storage/Onderzoeken'
         self.DFLT_DST_PATH = '/media/storage/backup/'
         self.DFLT_LOGFILE = '/media/storage/meta/runner_backup.log'
         # self.DFLT_RSYNC_LOGFILE = 'rsync.log'
@@ -59,13 +60,53 @@ class UserOptions:
         self.Src_syncstatus_file = self.DFLT_SRC_SYNCSTATUS_FILE
         # self.Excludes = self.DFLT_EXCLUDES
         self.Exclude_file = self.DFLT_EXCLUDE_FILE
-        self.Include_file = self.DFLT_INCLUDE_FILE
+        self.Include_file = None
         self.Keep_remote_sync_log = True
         self.Sync_local_log = self.DFLT_SYNC_LOCAL_LOG.format(curr_datetime=datetime.datetime.now())
         self.Sync_remote_log = self.DFLT_SYNC_REMOTE_LOG.format(curr_datetime=datetime.datetime.now())
         self.Use_file_list = False
         self.Newer_than = None
-
+# class UserOptions:
+#     def __init__(self):
+#         self.DFLT_SRC_HOST              = 'diginas01'
+#         self.DFLT_SRC_USER              = 'backup'
+#         self.DFLT_SRC_PATH              = '/volume1/Onderzoeken/'
+#         self.DFLT_DST_PATH              = '/mnt/diginas01_backup/test_backup/backup'
+#         self.DFLT_LOGFILE               = '/mnt/diginas01_backup/test_backup/meta/runner_backup.log'
+#         # self.DFLT_RSYNC_LOGFILE = 'rsync.log'
+#         self.DFLT_IFACE                 = 'ethinternal'
+#         self.DFLT_DATETIME_FORMAT       = '%Y-%m-%dT%H%M%S'
+#         self.DFLT_SRC_SYNCSTATUS_FILE   = '/volume1/Onderzoeken/sync_status.txt'
+#         self.DFLT_VALIDATION_REMOTE_BASE = '/volume1/Onderzoeken/'
+#         self.DFLT_VALIDATION_LOCAL_BASE = '/mnt/diginas01_backup/test_backup/'
+#         self.DFLT_VALIDATION_TEMP       = '/mnt/diginas01_backup/test_backup/validation/temp/'
+#         self.DFLT_METADATA_FILE         = '/mnt/diginas01_backup/test_backup/meta/syncstat.json'
+#         # self.DFLT_EXCLUDES = [self.DFLT_SRC_SYNCSTATUS_FILE]
+#         self.DFLT_EXCLUDE_FILE          = '/mnt/diginas01_backup/test_backup/meta/excludes.txt'
+#         self.DFLT_SYNC_REMOTE_LOG       = '/volume1/Onderzoeken/synchronization_{curr_datetime:%Y-%m-%dT%H%M}.log'
+#         self.DFLT_SYNC_LOCAL_LOG        = '/mnt/diginas01_backup/test_backup/meta/synchronization_{curr_datetime:%Y-%m-%dT%H%M}.log'
+#         self.DFLT_INCLUDE_FILE          = '/mnt/diginas01_backup/test_backup/meta/includes.txt'
+#
+#         self.Dry_run = False
+#         self.Delete_with_sync = False
+#         self.Force = False
+#         self.Control_nic = False
+#         self.Interface = self.DFLT_IFACE
+#         self.Src_host = self.DFLT_SRC_HOST
+#         self.Src_username = self.DFLT_SRC_USER
+#         self.Src_path = self.DFLT_SRC_PATH
+#         self.Dst_path = self.DFLT_DST_PATH
+#         self.Logfile = self.DFLT_LOGFILE
+#         # self.Rsync_logfile = self.DFLT_RSYNC_LOGFILE.format(curr_datetime=datetime.datetime.now())
+#         self.Src_syncstatus_file = self.DFLT_SRC_SYNCSTATUS_FILE
+#         # self.Excludes = self.DFLT_EXCLUDES
+#         self.Exclude_file = self.DFLT_EXCLUDE_FILE
+#         self.Include_file = self.DFLT_INCLUDE_FILE
+#         self.Keep_remote_sync_log = True
+#         self.Sync_local_log = self.DFLT_SYNC_LOCAL_LOG.format(curr_datetime=datetime.datetime.now())
+#         self.Sync_remote_log = self.DFLT_SYNC_REMOTE_LOG.format(curr_datetime=datetime.datetime.now())
+#         self.Use_file_list = False
+#         self.Newer_than = None
 
 # Global user options object (TODO: singleton access) -->
 user_options = UserOptions()
@@ -487,8 +528,12 @@ def validate_source_integrity(hash_reference_files:bool=False):
                 ref_hash=ref_hash,
                 live_hash=live_hash
             ))
+            # Remove validation -->
+            os.remove(live_full_path)
+
     # If we got through to here validation is successful -->
     logging.info('Validation success: Reference files match validation files')
+
     return True
 
 
@@ -521,8 +566,10 @@ def exec_rsync():
         rsync_params.append('--remote-option')
         rsync_params.append('--log-file={}'.format(user_options.Sync_remote_log))
 
-    if user_options.Include_file:
-        rsync_params.append('--include-from={include_file}'.format(include_file=user_options.Include_file))
+    if user_options.Use_file_list:
+        # TODO: When using include file adjust source path to account for source parent. Fix rsync cmd -->
+        user_options.Src_path = str(PurePath(user_options.Src_path).parent)
+        rsync_params.append('--files-from={include_file}'.format(include_file=user_options.Include_file))
 
     rsync_params.append('{user}@{host}:{sync_source}'.format(
         user=user_options.Src_username,
@@ -572,8 +619,14 @@ def control_netinterface(new_state:IFaceState):
 def get_sync_filelist():
     if user_options.Use_file_list is True and user_options.Newer_than is not None:
         print('getting filenames...')
-        cmd_find = 'find {search_loc} -newermt "{date_newerthan}" -type f'.format(
+
+        # TODO: when using include file adjust path. Fix params so that this is no longer needed -->
+        src_purePath = PurePath(user_options.Src_path)
+        Stem_dir = src_purePath.stem
+
+        cmd_find = 'cd {search_loc}/.. && find {dir_name} -newermt "{date_newerthan}" -type f'.format(
             search_loc=user_options.Src_path,
+            dir_name=Stem_dir,
             date_newerthan=user_options.Newer_than.strftime("%Y%m%d")
         )
 
@@ -623,6 +676,8 @@ def parse_args():
                         help='The path on the destination host.')
     parser.add_argument('--exclude-file', dest='exclude_file', default=None, type=str,
                         help='Path to file containing filepatterns to ignore (exclude) when syncing.')
+    parser.add_argument('--include-file', dest='include_file', default=None, type=str,
+                        help='Path to file containing files to include when syncing (relative path inc containing directory')
     parser.add_argument('--force', action='store_true', default=False,
                         help='Force updating of existing files.')
     parser.add_argument('--delete', action='store_true', default=False,
@@ -650,6 +705,8 @@ def parse_args():
         user_options.Dst_path = args.dst_path
     if args.exclude_file:
         user_options.Exclude_file = args.exclude_file
+    if args.include_file:
+        user_options.Include_file = args.include_file
     if args.force:
         user_options.Force = args.force
     if args.delete:
@@ -669,7 +726,7 @@ def parse_args():
         user_options.Sync_remote_log = args.remote_rsync_log
     if args.newer_than:
         user_options.Use_file_list = True
-
+        user_options.Include_file = user_options.DFLT_INCLUDE_FILE
         try:
             newerThanDate = datetime.datetime.strptime(args.newer_than, "%Y-%m-%d")
             user_options.Newer_than = newerThanDate
@@ -699,9 +756,11 @@ if __name__ == '__main__':
     # Get user options -->
     parse_args()
 
-    get_sync_filelist()
+    # get_sync_filelist()
+    #
+    # exit(0)
 
-    exit(0)
+
     # log_format = format=' %(asctime)s - %(levelname)s - %(funcName)s - %(message)s'
     #
     # logging.getLogger().addHandler(logging.StreamHandler())
@@ -740,13 +799,28 @@ if __name__ == '__main__':
     \tsrc path: {src_path}
     \tdelete with sync: {delete}
     \tforce: {force}
+    \tinclude file: {include_file}
+    \texclude file: {exclude_file}
+    \tonly newer than: {newer_than}
     '''.format(src_host=user_options.Src_host,
                src_username=user_options.Src_username,
                src_path=user_options.Src_path,
                delete=user_options.Delete_with_sync,
-               force=user_options.Force
+               force=user_options.Force,
+               include_file=user_options.Include_file,
+               exclude_file=user_options.Exclude_file,
+               newer_than=user_options.Newer_than
         )
     )
+
+    # When configured to sync only files newer than a certain date prepare the include file -->
+    if user_options.Newer_than is not None:
+        get_sync_filelist()
+
+    # user_options.Src_path = os.path.normpath(user_options.Src_path)
+    # src_name = os.path.normpath(user_options.Src_path).split(os.sep)[-1]
+    #
+    # user_options.Dst_path = os.path.normpath(user_options.Dst_path + os.sep + src_name)
 
     # Validate whether source is usable (link and content) -->
     validate_result = validate_source_integrity(hash_reference_files=False)
