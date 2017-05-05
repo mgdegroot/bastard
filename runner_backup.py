@@ -11,6 +11,7 @@
 #
 
 import os
+import sys
 import datetime
 import subprocess
 import shelve
@@ -22,6 +23,8 @@ import argparse
 import re
 from enum import Enum
 from pathlib import PurePath
+import configparser
+
 # TODO: get rid of these globals -->
 
 
@@ -45,12 +48,15 @@ class UserOptions:
         self.DFLT_SYNC_REMOTE_LOG = '/media/storage/synchronization_{curr_datetime:%Y-%m-%dT%H%M}.log'
         self.DFLT_SYNC_LOCAL_LOG = '/media/storage/meta/synchronization_{curr_datetime:%Y-%m-%dT%H%M}.log'
         self.DFLT_INCLUDE_FILE = '/media/storage/meta/includes.txt'
+        self.DFLT_CONFIG_FILE = os.path.splitext(sys.argv[0])[0] + ".ini"
+        self.DFLT_SITE = 'DEFAULT'
 
         self.Dry_run = False
         self.Delete_with_sync = False
         self.Force = False
         self.Control_nic = False
         self.Interface = self.DFLT_IFACE
+        self.Datetime_format = self.DFLT_DATETIME_FORMAT
         self.Src_host = self.DFLT_SRC_HOST
         self.Src_username = self.DFLT_SRC_USER
         self.Src_path = self.DFLT_SRC_PATH
@@ -58,7 +64,11 @@ class UserOptions:
         self.Logfile = self.DFLT_LOGFILE
         # self.Rsync_logfile = self.DFLT_RSYNC_LOGFILE.format(curr_datetime=datetime.datetime.now())
         self.Src_syncstatus_file = self.DFLT_SRC_SYNCSTATUS_FILE
+        self.Validation_remote_base = self.DFLT_VALIDATION_REMOTE_BASE
+        self.Validation_local_base = self.DFLT_VALIDATION_LOCAL_BASE
+        self.Validation_temp = self.DFLT_VALIDATION_TEMP
         # self.Excludes = self.DFLT_EXCLUDES
+        self.Metadata_file = self.DFLT_METADATA_FILE
         self.Exclude_file = self.DFLT_EXCLUDE_FILE
         self.Include_file = None
         self.Keep_remote_sync_log = True
@@ -66,6 +76,8 @@ class UserOptions:
         self.Sync_remote_log = self.DFLT_SYNC_REMOTE_LOG.format(curr_datetime=datetime.datetime.now())
         self.Use_file_list = False
         self.Newer_than = None
+        self.Config_file = self.DFLT_CONFIG_FILE
+        self.Site = self.DFLT_SITE
 # class UserOptions:
 #     def __init__(self):
 #         self.DFLT_SRC_HOST              = 'diginas01'
@@ -267,10 +279,10 @@ def write_metadata(metadata: dict):
     #     'prev_syncresult': True
     # }
 
-    with open(user_options.DFLT_METADATA_FILE, 'w') as metafile:
+    with open(user_options.Metadata_file, 'w') as metafile:
         json.dump(metadata, metafile)
 
-    logging.info('local metadata ({metafile}) file updated'.format(metafile=user_options.DFLT_METADATA_FILE))
+    logging.info('local metadata ({metafile}) file updated'.format(metafile=user_options.Metadata_file))
 
 
 def read_metadata(filename:str, interactive=True):
@@ -555,9 +567,11 @@ def exec_rsync():
         '--log-file={}'.format(user_options.Sync_local_log),
         '-av',
         '-e',
-        'ssh',
-        '--exclude-from={exclude_file}'.format(exclude_file=user_options.Exclude_file)
+        'ssh'
     ]
+
+    if user_options.Exclude_file:
+        rsync_params.append('--exclude-from={exclude_file}'.format(exclude_file=user_options.Exclude_file))
 
     if user_options.Delete_with_sync:
         rsync_params.append('--delete')
@@ -616,7 +630,11 @@ def control_netinterface(new_state:IFaceState):
         return False
 
 
-def get_sync_filelist():
+def get_and_write_newer_files():
+    """
+    When user_options is configured to only sync files newer than <> this function 
+    :return: 
+    """
     if user_options.Use_file_list is True and user_options.Newer_than is not None:
         print('getting filenames...')
 
@@ -660,19 +678,97 @@ def cleanup():
         os.remove(user_options.Include_file)
 
 
+def write_default_configfile():
+    """
+    Write a DEFAULT section to file 'user_options.Config_file'.
+    :return: 
+    """
+
+    config = configparser.ConfigParser(interpolation=None,allow_no_value=True)
+
+    config['DEFAULT'] = {
+        'LOGFILE': user_options.DFLT_LOGFILE,
+        'SYNC_REMOTE_LOG': user_options.DFLT_SYNC_REMOTE_LOG,
+        'SYNC_LOCAL_LOG': user_options.DFLT_SYNC_LOCAL_LOG,
+        'METADATA_FILE': user_options.DFLT_METADATA_FILE,
+        'VALIDATION_REMOTE_BASE': user_options.DFLT_VALIDATION_REMOTE_BASE,
+        'VALIDATION_LOCAL_BASE': user_options.DFLT_VALIDATION_LOCAL_BASE,
+        'VALIDATION_TEMP': user_options.DFLT_VALIDATION_TEMP,
+        'SRC_HOST': user_options.DFLT_SRC_HOST,
+        'SRC_USER': user_options.DFLT_SRC_USER,
+        'SRC_PATH': user_options.DFLT_SRC_PATH,
+        'DST_PATH': user_options.DFLT_DST_PATH,
+        'DATETIME_FORMAT': user_options.DFLT_DATETIME_FORMAT,
+        'EXCLUDE_FILE': user_options.DFLT_EXCLUDE_FILE,
+        'INCLUDE_FILE': None,
+        'FORCE': str(False),
+        'DELETE': str(False),
+        'DRY_RUN': str(False),
+        'CONTROL_NIC': str(False),
+        'INTERFACE': None,
+        'REMOTE_RSYNC_LOG': None,
+        'NEWER_THAN': None
+    }
+    #     config['DEFAULT']['SRC_HOST']
+    with open(user_options.Config_file, 'w') as configfile:
+        config.write(configfile)
+
+
+def read_configfile():
+    """
+    Populate user_options with values in user_options.Config_file. If the file is not found the user has
+    the option to create it.
+    'user_options.Config_file' must be populated with a valid filename.
+    If user_options.Site is filled this section will be used, else DEFAULT will be used.
+    :return: 
+    """
+    if not os.path.exists(user_options.Config_file):
+        if input("Config file not found in {}. Create default (y/n)?".format(user_options.Config_file)) == 'y':
+            write_default_configfile()
+        else:
+            raise FileNotFoundError('File {} not found.'.format(user_options.Config_file))
+
+    config = configparser.ConfigParser(interpolation=None, allow_no_value=True)
+
+    config.read(user_options.Config_file)
+
+    user_options.Logfile = config[user_options.Site]['LOGFILE']
+    user_options.Sync_remote_log = config[user_options.Site]['SYNC_REMOTE_LOG']
+    user_options.Sync_local_log = config[user_options.Site]['SYNC_LOCAL_LOG']
+    user_options.Metadata_file = config[user_options.Site]['METADATA_FILE']
+    user_options.Validation_remote_base = config[user_options.Site]['VALIDATION_REMOTE_BASE']
+    user_options.Validation_local_base = config[user_options.Site]['VALIDATION_LOCAL_BASE']
+    user_options.Validation_temp = config[user_options.Site]['VALIDATION_TEMP']
+    user_options.Src_host = config[user_options.Site]['SRC_HOST']
+    user_options.Src_path = config[user_options.Site]['SRC_PATH']
+    user_options.Dst_path = config[user_options.Site]['DST_PATH']
+    user_options.Datetime_format = config[user_options.Site]['DATETIME_FORMAT']
+    user_options.Exclude_file = config[user_options.Site]['EXCLUDE_FILE']
+    user_options.Include_file = config[user_options.Site]['INCLUDE_FILE']
+    user_options.Force = config.getboolean(user_options.Site,'FORCE')
+    user_options.Delete_with_sync = config.getboolean(user_options.Site,'DELETE')
+    user_options.Dry_run = config.getboolean(user_options.Site,'DRY_RUN')
+    user_options.Control_nic = config.getboolean(user_options.Site,'CONTROL_NIC')
+    user_options.Interface = config[user_options.Site]['INTERFACE']
+    user_options.Newer_than = config[user_options.Site]['NEWER_THAN']
+    # user_options.Sync_remote_log = config['']
+
 
 def parse_args():
     global user_options
 
     parser = argparse.ArgumentParser()
-
-    parser.add_argument('--src_host', default=user_options.DFLT_SRC_HOST, type=str,
+    parser.add_argument('--config', default=user_options.DFLT_CONFIG_FILE, type=str,
+                        help='The config file to use.')
+    parser.add_argument('--site', default=user_options.DFLT_SITE, type=str,
+                        help='The sitename section to use in the config file.')
+    parser.add_argument('--src_host', default=None, type=str,
                         help='The hostname or ip address of the source (origin).')
-    parser.add_argument('--src_username', default=user_options.DFLT_SRC_USER, type=str,
+    parser.add_argument('--src_username', default=None, type=str,
                         help='The username for the source (origin) host.')
-    parser.add_argument('--src-path', dest='src_path', default=user_options.DFLT_SRC_PATH, type=str,
+    parser.add_argument('--src-path', dest='src_path', default=None, type=str,
                         help='The path on the source (origin) host.')
-    parser.add_argument('--dst-path', dest='dst_path', default=user_options.DFLT_DST_PATH, type=str,
+    parser.add_argument('--dst-path', dest='dst_path', default=None, type=str,
                         help='The path on the destination host.')
     parser.add_argument('--exclude-file', dest='exclude_file', default=None, type=str,
                         help='Path to file containing filepatterns to ignore (exclude) when syncing.')
@@ -694,6 +790,13 @@ def parse_args():
                         help='Only sync files and directories newer then <yyyy-MM-dd hh:mm>')
 
     args = parser.parse_args()
+
+    if args.config:
+        user_options.Config_file = os.path.expanduser(args.config)
+    if args.site:
+        user_options.Site = args.site
+    # TODO: refactor to remove this call and move it in the proper flow -->
+    read_configfile()
 
     if args.src_host:
         user_options.Src_host = args.src_host
@@ -726,7 +829,8 @@ def parse_args():
         user_options.Sync_remote_log = args.remote_rsync_log
     if args.newer_than:
         user_options.Use_file_list = True
-        user_options.Include_file = user_options.DFLT_INCLUDE_FILE
+        if user_options.Include_file is None:
+            user_options.Include_file = user_options.DFLT_INCLUDE_FILE
         try:
             newerThanDate = datetime.datetime.strptime(args.newer_than, "%Y-%m-%d")
             user_options.Newer_than = newerThanDate
@@ -753,13 +857,9 @@ def init_logger():
 
 
 if __name__ == '__main__':
-    # Get user options -->
+
+    # Get user options from parameters and config file -->
     parse_args()
-
-    # get_sync_filelist()
-    #
-    # exit(0)
-
 
     # log_format = format=' %(asctime)s - %(levelname)s - %(funcName)s - %(message)s'
     #
@@ -779,7 +879,7 @@ if __name__ == '__main__':
         control_netinterface(IFaceState.UP)
 
     # Read info from previous run -->
-    metadata = read_metadata(user_options.DFLT_METADATA_FILE, interactive=True)
+    metadata = read_metadata(user_options.Metadata_file, interactive=True)
 
     print('''
     Previous run:
@@ -815,7 +915,7 @@ if __name__ == '__main__':
 
     # When configured to sync only files newer than a certain date prepare the include file -->
     if user_options.Newer_than is not None:
-        get_sync_filelist()
+        get_and_write_newer_files()
 
     # user_options.Src_path = os.path.normpath(user_options.Src_path)
     # src_name = os.path.normpath(user_options.Src_path).split(os.sep)[-1]
